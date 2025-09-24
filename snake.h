@@ -1,218 +1,183 @@
+#pragma once
 #include <iostream>
 #include <vector>
-#include <chrono>
-#include <thread>
-#include <stdlib.h>
-#include <termios.h>
-#include <unistd.h> // for system clear
-#include <map>
 #include <deque>
 #include <algorithm>
 #include <fstream>
+#include <map>
+#include <chrono>
+#include <thread>
+
+#ifdef _WIN32
+    #include <conio.h>   // Windows input
+#else
+    #include <termios.h> // Linux/macOS input
+    #include <unistd.h>
+#endif
 
 using namespace std;
-using std::chrono::system_clock;
-using namespace std::this_thread;
-char direction='r';
-vector<int> top_scores;
-bool paused = false;  // global flag
-void load_top_scores() {
-    ifstream infile("top_scores.txt");
-    int s;
-    top_scores.clear();
-    while (infile >> s) {
-        top_scores.push_back(s);
+
+const int BOARD_SIZE = 10;
+const int MAX_SCORES = 10;
+const int INITIAL_SPEED = 500;
+
+enum Direction { UP, DOWN, LEFT, RIGHT };
+
+class ScoreManager {
+    vector<int> top_scores;
+public:
+    void load() {
+        ifstream infile("top_scores.txt");
+        int s;
+        top_scores.clear();
+        while (infile >> s) top_scores.push_back(s);
+        infile.close();
+        sort(top_scores.rbegin(), top_scores.rend());
+        if (top_scores.size() > MAX_SCORES) top_scores.resize(MAX_SCORES);
     }
-    infile.close();
-    sort(top_scores.rbegin(), top_scores.rend()); // sort descending
-    if (top_scores.size() > 10) top_scores.resize(10); // keep top 10 only
-}
 
-void save_top_scores() {
-    ofstream outfile("top_scores.txt");
-    for (int s : top_scores) {
-        outfile << s << endl;
+    void save() {
+        ofstream outfile("top_scores.txt");
+        for (int s : top_scores) outfile << s << endl;
+        outfile.close();
     }
-    outfile.close();
-}
 
-void input_handler(){
-    // change terminal settings
-    struct termios oldt, newt;
-    tcgetattr(STDIN_FILENO, &oldt);
-    newt = oldt;
-    // turn off canonical mode and echo
-    newt.c_lflag &= ~(ICANON | ECHO);
-    tcsetattr(STDIN_FILENO, TCSANOW, &newt);
-    map<char, char> keymap = {{'d', 'r'}, {'a', 'l'}, {'w', 'u'}, {'s', 'd'}};
+    void add_score(int score) {
+        top_scores.push_back(score);
+        sort(top_scores.rbegin(), top_scores.rend());
+        if (top_scores.size() > MAX_SCORES) top_scores.resize(MAX_SCORES);
+    }
 
+    vector<int> get_scores() const { return top_scores; }
+};
 
-    while (true) {
-        char input = getchar();
-        if (keymap.find(input) != keymap.end()) {
-            // This now correctly modifies the single, shared 'direction' variable
-            direction = keymap[input];
-        }else if(input == 'p') {
-            paused = !paused;  // toggle pause/resume
-        } 
-        else if (input == 'q'){
-            exit(0);
+class SnakeGame {
+    deque<pair<int,int>> snake;
+    pair<int,int> food, poison, head;
+    Direction dir = RIGHT;
+    bool paused = false;
+    int score = 0, food_eaten = 0, speed = INITIAL_SPEED, poison_timer = 0;
+
+public:
+    SnakeGame() {
+        snake.push_back({0,0});
+        head = {0,1};
+        food = generate_food();
+        poison = generate_poison();
+    }
+
+    void set_direction(Direction d) { dir = d; }
+    void toggle_pause() { paused = !paused; }
+    bool is_paused() const { return paused; }
+    int get_score() const { return score; }
+    deque<pair<int,int>> get_snake() const { return snake; }
+    pair<int,int> get_food() const { return food; }
+    pair<int,int> get_poison() const { return poison; }
+
+    pair<int,int> next_head() {
+        switch(dir) {
+            case RIGHT: return {head.first, (head.second+1)%BOARD_SIZE};
+            case LEFT:  return {head.first, head.second==0? BOARD_SIZE-1 : head.second-1};
+            case DOWN:  return {(head.first+1)%BOARD_SIZE, head.second};
+            case UP:    return {head.first==0? BOARD_SIZE-1 : head.first-1, head.second};
         }
-        // You could add an exit condition here, e.g., if (input == 'q') break;
+        return head;
     }
-    tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
-}
 
+    bool step() {
+        if (paused) return true;
+        head = next_head();
 
-void render_game(int size, deque<pair<int, int>> &snake, pair<int, int> food, pair<int,int> poison) {
-    for (size_t i = 0; i < size; i++) {
-        for (size_t j = 0; j < size; j++) {
-            if (i == food.first && j == food.second) {
-                cout << "🍎";   // good food
-            } else if (i == poison.first && j == poison.second) {
-                cout << "☠️";   // poison food
-            } else if (find(snake.begin(), snake.end(), make_pair(int(i), int(j))) != snake.end()) {
-                cout << "🐍";   // snake body
-            } else {
-                cout << "⬜";   // empty cell
+        // collision with self
+        if (find(snake.begin(), snake.end(), head) != snake.end()) return false;
+        // collision with poison
+        if (head == poison) return false;
+
+        if (head == food) {
+            snake.push_back(head);
+            score += 10;
+            food_eaten++;
+            food = generate_food();
+            if (food_eaten % 10 == 0 && speed > 100) speed -= 50;
+        } else {
+            snake.push_back(head);
+            snake.pop_front();
+        }
+
+        poison_timer += speed;
+        if (poison_timer >= 5000) {
+            poison = generate_poison();
+            poison_timer = 0;
+        }
+        return true;
+    }
+
+private:
+    pair<int,int> generate_food() {
+        pair<int,int> f;
+        do { f = {rand()%BOARD_SIZE, rand()%BOARD_SIZE}; }
+        while (find(snake.begin(), snake.end(), f) != snake.end());
+        return f;
+    }
+
+    pair<int,int> generate_poison() {
+        pair<int,int> p;
+        do { p = {rand()%BOARD_SIZE, rand()%BOARD_SIZE}; }
+        while (find(snake.begin(), snake.end(), p) != snake.end() || p==food);
+        return p;
+    }
+};
+
+class Renderer {
+public:
+    static void render(const SnakeGame& game) {
+        auto snake = game.get_snake();
+        auto food = game.get_food();
+        auto poison = game.get_poison();
+
+        for (int i=0;i<BOARD_SIZE;i++) {
+            for (int j=0;j<BOARD_SIZE;j++) {
+                if (make_pair(i,j)==food) cout << "F";
+                else if (make_pair(i,j)==poison) cout << "X";
+                else if (find(snake.begin(),snake.end(),make_pair(i,j))!=snake.end()) cout << "O";
+                else cout << ".";
             }
+            cout << endl;
         }
-        cout << endl;
     }
-}
+};
 
-
-
-
-pair<int,int> get_next_head(pair<int,int> current, char direction){
-    pair<int, int> next; 
-    if(direction =='r'){
-        next = make_pair(current.first,(current.second+1) % 10);
-    }else if (direction=='l')
-    {
-        next = make_pair(current.first, current.second==0?9:current.second-1);
-    }else if(direction =='d'){
-            next = make_pair((current.first+1)%10,current.second);
-        }else if (direction=='u'){
-            next = make_pair(current.first==0?9:current.first-1, current.second);
+class InputHandler {
+public:
+    static void run(SnakeGame &game) {
+#ifdef _WIN32
+        while (true) {
+            if (_kbhit()) {
+                char input = _getch();
+                if (input=='d') game.set_direction(RIGHT);
+                else if (input=='a') game.set_direction(LEFT);
+                else if (input=='w') game.set_direction(UP);
+                else if (input=='s') game.set_direction(DOWN);
+                else if (input=='p') game.toggle_pause();
+                else if (input=='q') exit(0);
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
-    return next;
-    
-}
+#else
+        struct termios oldt, newt;
+        tcgetattr(STDIN_FILENO, &oldt);
+        newt = oldt;
+        newt.c_lflag &= ~(ICANON | ECHO);
+        tcsetattr(STDIN_FILENO, TCSANOW, &newt);
 
-pair<int,int> generate_food(int size, const deque<pair<int,int>> &snake) {
-    pair<int,int> food;
-    do {
-        food = make_pair(rand() % size, rand() % size);
-    } while (find(snake.begin(), snake.end(), food) != snake.end());
-    return food;
-}
-
-pair<int,int> generate_poison(int size, const deque<pair<int,int>> &snake, pair<int,int> food) {
-    pair<int,int> poison;
-    do {
-        poison = make_pair(rand() % size, rand() % size);
-    } while (
-        find(snake.begin(), snake.end(), poison) != snake.end() || poison == food
-    );
-    return poison;
-}
-
-void game_play() {
-    load_top_scores();
-
-    system("clear");
-    deque<pair<int, int>> snake;
-    snake.push_back(make_pair(0, 0));
-
-    pair<int, int> food = generate_food(10, snake);
-    pair<int, int> poison = generate_poison(10, snake, food);
-
-
-    int food_eaten = 0;   // count how many food items eaten
-    int speed = 500;      // start speed in milliseconds
-    int score = 0;        // for tracking of the score
-    int poison_timer = 0; // track poison movement
-
-pair<int,int> head = make_pair(0, 1);  // initial head position
-while (true) {
-    // send the cursor to the top
-    cout << "\033[H";
-
-    // Pause handling
-    while (paused) {
-        system("clear");
-        render_game(10, snake, food, poison);
-        cout << "=== PAUSED ===" << endl;
-        cout << "Press 'p' to resume..." << endl;
-        sleep_for(std::chrono::milliseconds(200));  // reduce CPU usage
-        system("clear");
-    }
-
-    // calculate next head
-    head = get_next_head(head, direction);
-
-    // check self collision
-//   ding order
- if (find(snake.begin(), snake.end(), head) != snake.end()) {
-    system("clear");
-
-    // Update top scores and save
-    top_scores.push_back(score);
-    sort(top_scores.rbegin(), top_scores.rend()); // descending
-    if (top_scores.size() > 10) top_scores.resize(10);
-    save_top_scores();
-
-    cout << "Game Over! Snake hit itself." << endl;
-    cout << "Top 10 Scores:" << endl;
-    for (int s : top_scores) cout << s << endl;
-
-    exit(0);
-} 
-else if (head == poison) {
-    system("clear");
-
-    // Update top scores and save
-    top_scores.push_back(score);
-    sort(top_scores.rbegin(), top_scores.rend()); // descending
-    if (top_scores.size() > 10) top_scores.resize(10);
-    save_top_scores();
-
-    cout << "Game Over! Snake ate poison ☠️." << endl;
-    cout << "Top 10 Scores:" << endl;
-    for (int s : top_scores) cout << s << endl;
-
-    exit(0);
-}
-
-
-    else if (head.first == food.first && head.second == food.second) {
-        // grow snake
-        food = generate_food(10, snake);
-        snake.push_back(head);
-        food_eaten++;
-        score += 10;
-
-        if (food_eaten % 10 == 0 && speed > 100) {
-            speed += 50;  
+        map<char,Direction> keymap = {{'d',RIGHT},{'a',LEFT},{'w',UP},{'s',DOWN}};
+        while(true){
+            char input = getchar();
+            if (keymap.count(input)) game.set_direction(keymap[input]);
+            else if (input=='p') game.toggle_pause();
+            else if (input=='q') exit(0);
         }
-    } else {
-        // move snake
-        snake.push_back(head);
-        snake.pop_front();
+        tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+#endif
     }
-
-    poison_timer += speed; // add time passed in this loop
-    if (poison_timer >= 5000) {
-        poison = generate_poison(10, snake, food);
-        poison_timer = 0;
-    }
-
-    render_game(10, snake, food, poison);
-    cout << "length of snake: " << snake.size() << endl;
-    cout << "Score: " << score << endl;
-    cout << "food eaten: " << food_eaten << " | current speed: " << speed << "ms" << endl;
-
-    sleep_for(std::chrono::milliseconds(speed));
-}
-}
+};
